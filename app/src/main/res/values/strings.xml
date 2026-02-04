@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Saaya AI</string>
+    <string name="select_model_file">Select Model File</string>
+    <string name="model_loading">Loading AI Model...</string>
+    <string name="model_loaded">Model Ready</string>
+    <string name="type_message">Type your message...</string>
+    <string name="send">Send</string>
+    <string name="change_model">Change Model</string>
+    <string name="error_loading_model">Error loading model</string>
+    <string name="permission_required">Storage permission is required</string>
+</resources>
