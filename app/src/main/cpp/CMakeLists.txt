@@ -1,50 +1,60 @@
 cmake_minimum_required(VERSION 3.22.1)
 
-project("llama-android")
+project(llama-android)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Find required Android libraries
-find_library(log-lib log)
-find_library(android-lib android)
+# Optimization flags for ARM
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O3 -DNDEBUG")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -DNDEBUG")
 
-# Add llama.cpp source directory
-# You need to place llama.cpp source in src/main/cpp/llama.cpp/
-set(LLAMA_DIR ${CMAKE_SOURCE_DIR}/llama.cpp)
+# Enable NEON for ARM
+if(ANDROID_ABI MATCHES "^armeabi-v7a")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -mfpu=neon")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -mfpu=neon")
+endif()
 
-# llama.cpp sources
+# llama.cpp source directory (will be cloned here)
+set(LLAMA_CPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp)
+set(LLAMA_SRC_DIR ${LLAMA_CPP_DIR}/src)
+set(GGML_DIR ${LLAMA_CPP_DIR}/ggml)
+
+# Add llama.cpp sources (new structure as of 2024)
 set(LLAMA_SOURCES
-    ${LLAMA_DIR}/ggml.c
-    ${LLAMA_DIR}/llama.cpp
-    ${LLAMA_DIR}/common/common.cpp
-    ${LLAMA_DIR}/common/sampling.cpp
+    ${GGML_DIR}/src/ggml.c
+    ${GGML_DIR}/src/ggml-alloc.c
+    ${GGML_DIR}/src/ggml-backend.c
+    ${GGML_DIR}/src/ggml-quants.c
+    ${LLAMA_SRC_DIR}/llama.cpp
+    ${LLAMA_SRC_DIR}/llama-vocab.cpp
+    ${LLAMA_SRC_DIR}/llama-grammar.cpp
+    ${LLAMA_SRC_DIR}/llama-sampling.cpp
+)
+
+# Include directories
+include_directories(
+    ${LLAMA_CPP_DIR}/include
+    ${GGML_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
 # Build llama.cpp as static library
 add_library(llama STATIC ${LLAMA_SOURCES})
 
-target_include_directories(llama PUBLIC
-    ${LLAMA_DIR}
-    ${LLAMA_DIR}/common
-)
-
 target_compile_definitions(llama PRIVATE
-    GGML_USE_CPU
+    GGML_USE_K_QUANTS
+    GGML_MULTIPLATFORM
 )
 
-# Build JNI wrapper
-add_library(${CMAKE_PROJECT_NAME} SHARED
+# JNI wrapper library
+add_library(llama-android SHARED
     llama-android.cpp
 )
 
-target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    ${LLAMA_DIR}
-    ${LLAMA_DIR}/common
-)
-
-target_link_libraries(${CMAKE_PROJECT_NAME}
+# Link libraries
+target_link_libraries(llama-android
     llama
-    ${log-lib}
-    ${android-lib}
+    android
+    log
 )

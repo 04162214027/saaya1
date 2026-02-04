@@ -36,14 +36,15 @@ import java.io.InputStream;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-import com.saaya.ai.LlamaModel.ModelParameters;
-import com.saaya.ai.LlamaModel.InferenceParameters;
-
 public class MainActivity extends AppCompatActivity {
     private static final String TAG = "SaayaAI";
     private static final String PREFS_NAME = "SaayaPrefs";
     private static final String KEY_MODEL_PATH = "model_path";
     private static final int PERMISSION_REQUEST_CODE = 100;
+    
+    // Model configuration
+    private static final int CONTEXT_SIZE = 2048;
+    private static final int MAX_TOKENS = 512;
 
     // UI Components
     private RecyclerView chatRecyclerView;
@@ -54,7 +55,6 @@ public class MainActivity extends AppCompatActivity {
     private ChatAdapter chatAdapter;
 
     // AI Model
-    private LlamaModel model;
     private String modelPath;
     private boolean isModelLoaded = false;
     private ExecutorService executorService;
@@ -332,25 +332,35 @@ public class MainActivity extends AppCompatActivity {
 
         executorService.execute(() -> {
             try {
-                Log.d(TAG, "Loading model from: " + path);
+                Log.d(TAG, "Initializing llama.cpp backend...");
+                LlamaCpp.initBackend();
                 
-                ModelParameters modelParams = new ModelParameters()
-                        .setModelFilePath(path)
-                        .setNGpuLayers(0) // CPU only, set to 99 for GPU if available
-                        .setContextSize(2048)
-                        .setSeed(42);
-
-                model = new LlamaModel(modelParams);
-                isModelLoaded = true;
-
-                mainHandler.post(() -> {
-                    showStatus("Model loaded successfully! Ready to chat.");
-                    setInputEnabled(true);
-                    Toast.makeText(this, "AI Model loaded - Ready!", Toast.LENGTH_SHORT).show();
-                });
+                Log.d(TAG, "Loading model from: " + path);
+                int numThreads = Math.max(1, Runtime.getRuntime().availableProcessors() - 1);
+                
+                boolean success = LlamaCpp.loadModel(path, CONTEXT_SIZE, numThreads);
+                
+                if (success) {
+                    isModelLoaded = true;
+                    LlamaCpp.setLoaded(true);
+                    
+                    String modelInfo = LlamaCpp.getModelInfo();
+                    Log.i(TAG, "Model loaded: " + modelInfo);
+                    
+                    mainHandler.post(() -> {
+                        showStatus("Model loaded successfully! Ready to chat.");
+                        setInputEnabled(true);
+                        Toast.makeText(this, "AI Model loaded - Ready!", Toast.LENGTH_SHORT).show();
+                    });
+                } else {
+                    throw new RuntimeException("Failed to load model - llama.cpp returned false");
+                }
 
             } catch (Exception e) {
                 Log.e(TAG, "Error loading model", e);
+                isModelLoaded = false;
+                LlamaCpp.setLoaded(false);
+                
                 mainHandler.post(() -> {
                     showStatus("Error loading model: " + e.getMessage());
                     Toast.makeText(this, "Failed to load model: " + e.getMessage(), 
@@ -401,23 +411,22 @@ public class MainActivity extends AppCompatActivity {
         // Generate response in background
         executorService.execute(() -> {
             try {
-                InferenceParameters inferParams = new InferenceParameters()
-                        .setTemperature(0.7f)
-                        .setTopP(0.9f)
-                        .setTopK(40)
-                        .setMaxTokens(512);
-
-                StringBuilder fullResponse = new StringBuilder();
+                Log.d(TAG, "Generating response for: " + userMessage);
                 
-                for (String token : model.generate(userMessage, inferParams)) {
-                    fullResponse.append(token);
-                    
-                    final String currentResponse = fullResponse.toString();
+                // Call native llama.cpp inference
+                String response = LlamaCpp.generateToken(userMessage, MAX_TOKENS);
+                
+                if (response != null && !response.isEmpty()) {
                     mainHandler.post(() -> {
-                        chatAdapter.updateLastMessage(currentResponse);
+                        chatAdapter.updateLastMessage(response);
                         chatRecyclerView.scrollToPosition(aiMessagePosition);
+                        showStatus("Ready");
+                        setInputEnabled(true);
                     });
+                } else {
+                    throw new RuntimeException("Model returned empty response");
                 }
+
 
                 mainHandler.post(() -> {
                     setInputEnabled(true);
@@ -454,11 +463,12 @@ public class MainActivity extends AppCompatActivity {
         super.onDestroy();
         
         // Clean up model
-        if (model != null) {
+        if (isModelLoaded) {
             try {
-                model.close();
+                LlamaCpp.unloadModel();
+                LlamaCpp.freeBackend();
             } catch (Exception e) {
-                Log.e(TAG, "Error closing model", e);
+                Log.e(TAG, "Error unloading model", e);
             }
         }
         

@@ -2,319 +2,266 @@
 #include <android/log.h>
 #include <string>
 #include <vector>
-#include <thread>
-#include "llama.h"
-#include "common.h"
-#include "sampling.h"
+#include <memory>
+#include <cstring>
+#include "llama.cpp/llama.h"
+#include "llama.cpp/ggml.h"
 
-#define TAG "LlamaNative"
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, TAG, __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, TAG, __VA_ARGS__)
+#define LOG_TAG "LlamaCpp"
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
-struct llama_context_wrapper {
-    llama_model* model;
-    llama_context* ctx;
-    llama_sampler* sampler;
+// Global context holder
+struct LlamaContext {
+    llama_model* model = nullptr;
+    llama_context* ctx = nullptr;
+    llama_sampler* sampler = nullptr;
+    int n_ctx = 2048;
+    int n_threads = 4;
 };
 
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_saaya_ai_LlamaNative_loadModel(
-        JNIEnv* env,
-        jobject /* this */,
-        jstring modelPath,
-        jint nCtx,
-        jint nThreads) {
-    
-    const char* model_path = env->GetStringUTFChars(modelPath, nullptr);
-    LOGD("Loading model from: %s", model_path);
-    
-    // Initialize backend
+static std::unique_ptr<LlamaContext> g_llama_ctx;
+
+extern "C" {
+
+// Initialize backend
+JNIEXPORT void JNICALL
+Java_com_saaya_ai_LlamaCpp_initBackend(JNIEnv* env, jclass clazz) {
+    LOGI("Initializing llama.cpp backend");
     llama_backend_init();
+    llama_numa_init(GGML_NUMA_STRATEGY_DISABLED);
+}
+
+// Free backend
+JNIEXPORT void JNICALL
+Java_com_saaya_ai_LlamaCpp_freeBackend(JNIEnv* env, jclass clazz) {
+    LOGI("Freeing llama.cpp backend");
+    llama_backend_free();
+}
+
+// Load model
+JNIEXPORT jboolean JNICALL
+Java_com_saaya_ai_LlamaCpp_loadModel(
+    JNIEnv* env, 
+    jclass clazz,
+    jstring modelPath,
+    jint nCtx,
+    jint nThreads
+) {
+    const char* model_path = env->GetStringUTFChars(modelPath, nullptr);
     
-    // Load model
-    llama_model_params model_params = llama_model_default_params();
-    model_params.n_gpu_layers = 0; // CPU only for compatibility
+    LOGI("Loading model from: %s", model_path);
+    LOGI("Context size: %d, Threads: %d", nCtx, nThreads);
     
-    llama_model* model = llama_load_model_from_file(model_path, model_params);
-    env->ReleaseStringUTFChars(modelPath, model_path);
-    
-    if (!model) {
-        LOGE("Failed to load model");
-        return 0;
+    // Free previous model if exists
+    if (g_llama_ctx) {
+        if (g_llama_ctx->sampler) {
+            llama_sampler_free(g_llama_ctx->sampler);
+        }
+        if (g_llama_ctx->ctx) {
+            llama_free(g_llama_ctx->ctx);
+        }
+        if (g_llama_ctx->model) {
+            llama_free_model(g_llama_ctx->model);
+        }
     }
     
-    // Create context
+    g_llama_ctx = std::make_unique<LlamaContext>();
+    g_llama_ctx->n_ctx = nCtx;
+    g_llama_ctx->n_threads = nThreads;
+    
+    // Model parameters
+    llama_model_params model_params = llama_model_default_params();
+    model_params.n_gpu_layers = 0; // CPU only
+    model_params.use_mmap = true;  // Memory mapping for large models
+    model_params.use_mlock = false;
+    
+    // Load model
+    g_llama_ctx->model = llama_load_model_from_file(model_path, model_params);
+    
+    env->ReleaseStringUTFChars(modelPath, model_path);
+    
+    if (!g_llama_ctx->model) {
+        LOGE("Failed to load model");
+        g_llama_ctx.reset();
+        return JNI_FALSE;
+    }
+    
+    // Context parameters
     llama_context_params ctx_params = llama_context_default_params();
     ctx_params.n_ctx = nCtx;
     ctx_params.n_threads = nThreads;
     ctx_params.n_threads_batch = nThreads;
+    ctx_params.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED;
     
-    llama_context* ctx = llama_new_context_with_model(model, ctx_params);
-    if (!ctx) {
+    // Create context
+    g_llama_ctx->ctx = llama_new_context_with_model(g_llama_ctx->model, ctx_params);
+    
+    if (!g_llama_ctx->ctx) {
         LOGE("Failed to create context");
-        llama_free_model(model);
-        return 0;
+        llama_free_model(g_llama_ctx->model);
+        g_llama_ctx.reset();
+        return JNI_FALSE;
     }
     
     // Create sampler
     auto sparams = llama_sampler_chain_default_params();
-    llama_sampler* sampler = llama_sampler_chain_init(sparams);
-    llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.8f));
-    llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
-    llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.95f, 1));
-    llama_sampler_chain_add(sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+    g_llama_ctx->sampler = llama_sampler_chain_init(sparams);
     
-    // Wrap in struct
-    auto* wrapper = new llama_context_wrapper{model, ctx, sampler};
+    llama_sampler_chain_add(g_llama_ctx->sampler, llama_sampler_init_temp(0.7f));
+    llama_sampler_chain_add(g_llama_ctx->sampler, llama_sampler_init_top_k(40));
+    llama_sampler_chain_add(g_llama_ctx->sampler, llama_sampler_init_top_p(0.9f, 1));
+    llama_sampler_chain_add(g_llama_ctx->sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
     
-    LOGD("Model loaded successfully");
-    return reinterpret_cast<jlong>(wrapper);
+    LOGI("Model loaded successfully");
+    return JNI_TRUE;
 }
 
-extern "C" JNIEXPORT jstring JNICALL
-Java_com_saaya_ai_LlamaNative_completion(
-        JNIEnv* env,
-        jobject /* this */,
-        jlong modelPtr,
-        jstring prompt,
-        jint maxTokens,
-        jfloat temperature,
-        jint topK,
-        jfloat topP) {
-    
-    auto* wrapper = reinterpret_cast<llama_context_wrapper*>(modelPtr);
-    if (!wrapper || !wrapper->model || !wrapper->ctx) {
-        LOGE("Invalid model pointer");
+// Generate text (streaming)
+JNIEXPORT jstring JNICALL
+Java_com_saaya_ai_LlamaCpp_generateToken(
+    JNIEnv* env,
+    jclass clazz,
+    jstring prompt,
+    jint maxTokens
+) {
+    if (!g_llama_ctx || !g_llama_ctx->ctx) {
+        LOGE("Context not initialized");
         return env->NewStringUTF("");
     }
     
-    const char* prompt_text = env->GetStringUTFChars(prompt, nullptr);
-    LOGD("Generating completion for: %s", prompt_text);
+    const char* prompt_cstr = env->GetStringUTFChars(prompt, nullptr);
+    std::string prompt_str(prompt_cstr);
+    env->ReleaseStringUTFChars(prompt, prompt_cstr);
+    
+    LOGI("Generating response for prompt: %s", prompt_str.c_str());
     
     // Tokenize prompt
     std::vector<llama_token> tokens;
-    const int n_prompt_tokens = -llama_tokenize(
-        wrapper->model,
-        prompt_text,
-        strlen(prompt_text),
-        nullptr,
-        0,
-        true,
-        true
-    );
-    tokens.resize(n_prompt_tokens);
-    llama_tokenize(
-        wrapper->model,
-        prompt_text,
-        strlen(prompt_text),
+    tokens.resize(prompt_str.length() + 2);
+    
+    int n_tokens = llama_tokenize(
+        g_llama_ctx->model,
+        prompt_str.c_str(),
+        prompt_str.length(),
         tokens.data(),
         tokens.size(),
-        true,
-        true
+        true,  // add_bos
+        false  // special
     );
     
-    env->ReleaseStringUTFChars(prompt, prompt_text);
+    if (n_tokens < 0) {
+        tokens.resize(-n_tokens);
+        n_tokens = llama_tokenize(
+            g_llama_ctx->model,
+            prompt_str.c_str(),
+            prompt_str.length(),
+            tokens.data(),
+            tokens.size(),
+            true,
+            false
+        );
+    }
     
-    // Update sampler parameters
-    llama_sampler_free(wrapper->sampler);
-    auto sparams = llama_sampler_chain_default_params();
-    wrapper->sampler = llama_sampler_chain_init(sparams);
-    llama_sampler_chain_add(wrapper->sampler, llama_sampler_init_temp(temperature));
-    llama_sampler_chain_add(wrapper->sampler, llama_sampler_init_top_k(topK));
-    llama_sampler_chain_add(wrapper->sampler, llama_sampler_init_top_p(topP, 1));
-    llama_sampler_chain_add(wrapper->sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
+    tokens.resize(n_tokens);
     
-    // Evaluate prompt
-    llama_batch batch = llama_batch_get_one(tokens.data(), tokens.size());
-    if (llama_decode(wrapper->ctx, batch) != 0) {
+    LOGI("Tokenized prompt: %d tokens", n_tokens);
+    
+    // Reset context
+    llama_kv_cache_clear(g_llama_ctx->ctx);
+    llama_sampler_reset(g_llama_ctx->sampler);
+    
+    // Process prompt
+    llama_batch batch = llama_batch_init(n_tokens, 0, 1);
+    
+    for (int i = 0; i < n_tokens; i++) {
+        llama_batch_add(batch, tokens[i], i, { 0 }, false);
+    }
+    
+    batch.logits[batch.n_tokens - 1] = true;
+    
+    if (llama_decode(g_llama_ctx->ctx, batch) != 0) {
         LOGE("Failed to decode prompt");
+        llama_batch_free(batch);
         return env->NewStringUTF("");
     }
     
-    // Generate tokens
-    std::string result;
-    int n_generated = 0;
+    // Generate response
+    std::string response;
+    int n_cur = batch.n_tokens;
+    int n_gen = 0;
     
-    while (n_generated < maxTokens) {
-        // Sample next token
-        llama_token new_token_id = llama_sampler_sample(wrapper->sampler, wrapper->ctx, -1);
+    while (n_gen < maxTokens) {
+        const llama_token new_token_id = llama_sampler_sample(g_llama_ctx->sampler, g_llama_ctx->ctx, -1);
         
         // Check for EOS
-        if (llama_token_is_eog(wrapper->model, new_token_id)) {
+        if (llama_token_is_eog(g_llama_ctx->model, new_token_id)) {
             break;
         }
         
-        // Decode token to text
-        char buf[256];
-        int n = llama_token_to_piece(wrapper->model, new_token_id, buf, sizeof(buf), 0, true);
-        if (n < 0) {
-            LOGE("Failed to decode token");
-            break;
+        // Get token text
+        char token_str[256];
+        int n = llama_token_to_piece(g_llama_ctx->model, new_token_id, token_str, sizeof(token_str), 0, false);
+        
+        if (n > 0) {
+            response.append(token_str, n);
         }
-        result.append(buf, n);
         
         // Prepare next batch
-        batch = llama_batch_get_one(&new_token_id, 1);
-        if (llama_decode(wrapper->ctx, batch) != 0) {
+        llama_batch_clear(batch);
+        llama_batch_add(batch, new_token_id, n_cur++, { 0 }, true);
+        
+        if (llama_decode(g_llama_ctx->ctx, batch) != 0) {
             LOGE("Failed to decode token");
             break;
         }
         
-        n_generated++;
+        n_gen++;
     }
     
-    LOGD("Generated %d tokens", n_generated);
-    return env->NewStringUTF(result.c_str());
+    llama_batch_free(batch);
+    
+    LOGI("Generated %d tokens", n_gen);
+    
+    return env->NewStringUTF(response.c_str());
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_saaya_ai_LlamaNative_completionStream(
-        JNIEnv* env,
-        jobject /* this */,
-        jlong modelPtr,
-        jstring prompt,
-        jint maxTokens,
-        jfloat temperature,
-        jint topK,
-        jfloat topP,
-        jobject callback) {
+// Unload model
+JNIEXPORT void JNICALL
+Java_com_saaya_ai_LlamaCpp_unloadModel(JNIEnv* env, jclass clazz) {
+    LOGI("Unloading model");
     
-    auto* wrapper = reinterpret_cast<llama_context_wrapper*>(modelPtr);
-    if (!wrapper || !wrapper->model || !wrapper->ctx) {
-        LOGE("Invalid model pointer");
-        return;
+    if (g_llama_ctx) {
+        if (g_llama_ctx->sampler) {
+            llama_sampler_free(g_llama_ctx->sampler);
+        }
+        if (g_llama_ctx->ctx) {
+            llama_free(g_llama_ctx->ctx);
+        }
+        if (g_llama_ctx->model) {
+            llama_free_model(g_llama_ctx->model);
+        }
+        g_llama_ctx.reset();
+    }
+}
+
+// Get model info
+JNIEXPORT jstring JNICALL
+Java_com_saaya_ai_LlamaCpp_getModelInfo(JNIEnv* env, jclass clazz) {
+    if (!g_llama_ctx || !g_llama_ctx->model) {
+        return env->NewStringUTF("No model loaded");
     }
     
-    // Get callback method
-    jclass callbackClass = env->GetObjectClass(callback);
-    jmethodID onTokenMethod = env->GetMethodID(callbackClass, "onToken", "(Ljava/lang/String;)V");
-    if (!onTokenMethod) {
-        LOGE("Failed to find onToken method");
-        return;
-    }
-    
-    const char* prompt_text = env->GetStringUTFChars(prompt, nullptr);
-    LOGD("Streaming completion for: %s", prompt_text);
-    
-    // Tokenize prompt
-    std::vector<llama_token> tokens;
-    const int n_prompt_tokens = -llama_tokenize(
-        wrapper->model,
-        prompt_text,
-        strlen(prompt_text),
-        nullptr,
-        0,
-        true,
-        true
-    );
-    tokens.resize(n_prompt_tokens);
-    llama_tokenize(
-        wrapper->model,
-        prompt_text,
-        strlen(prompt_text),
-        tokens.data(),
-        tokens.size(),
-        true,
-        true
+    char buf[512];
+    snprintf(buf, sizeof(buf), 
+        "Model: %s\nContext: %d\nThreads: %d\nVocab: %d",
+        llama_model_desc(g_llama_ctx->model, buf, sizeof(buf)),
+        g_llama_ctx->n_ctx,
+        g_llama_ctx->n_threads,
+        llama_n_vocab(g_llama_ctx->model)
     );
     
-    env->ReleaseStringUTFChars(prompt, prompt_text);
-    
-    // Update sampler
-    llama_sampler_free(wrapper->sampler);
-    auto sparams = llama_sampler_chain_default_params();
-    wrapper->sampler = llama_sampler_chain_init(sparams);
-    llama_sampler_chain_add(wrapper->sampler, llama_sampler_init_temp(temperature));
-    llama_sampler_chain_add(wrapper->sampler, llama_sampler_init_top_k(topK));
-    llama_sampler_chain_add(wrapper->sampler, llama_sampler_init_top_p(topP, 1));
-    llama_sampler_chain_add(wrapper->sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
-    
-    // Evaluate prompt
-    llama_batch batch = llama_batch_get_one(tokens.data(), tokens.size());
-    if (llama_decode(wrapper->ctx, batch) != 0) {
-        LOGE("Failed to decode prompt");
-        return;
-    }
-    
-    // Stream tokens
-    int n_generated = 0;
-    while (n_generated < maxTokens) {
-        // Sample next token
-        llama_token new_token_id = llama_sampler_sample(wrapper->sampler, wrapper->ctx, -1);
-        
-        // Check for EOS
-        if (llama_token_is_eog(wrapper->model, new_token_id)) {
-            break;
-        }
-        
-        // Decode token
-        char buf[256];
-        int n = llama_token_to_piece(wrapper->model, new_token_id, buf, sizeof(buf), 0, true);
-        if (n < 0) {
-            LOGE("Failed to decode token");
-            break;
-        }
-        
-        // Call Java callback
-        jstring token = env->NewStringUTF(std::string(buf, n).c_str());
-        env->CallVoidMethod(callback, onTokenMethod, token);
-        env->DeleteLocalRef(token);
-        
-        // Prepare next batch
-        batch = llama_batch_get_one(&new_token_id, 1);
-        if (llama_decode(wrapper->ctx, batch) != 0) {
-            LOGE("Failed to decode token");
-            break;
-        }
-        
-        n_generated++;
-    }
-    
-    LOGD("Streamed %d tokens", n_generated);
+    return env->NewStringUTF(buf);
 }
 
-extern "C" JNIEXPORT void JNICALL
-Java_com_saaya_ai_LlamaNative_freeModel(
-        JNIEnv* env,
-        jobject /* this */,
-        jlong modelPtr) {
-    
-    auto* wrapper = reinterpret_cast<llama_context_wrapper*>(modelPtr);
-    if (wrapper) {
-        LOGD("Freeing model resources");
-        if (wrapper->sampler) {
-            llama_sampler_free(wrapper->sampler);
-        }
-        if (wrapper->ctx) {
-            llama_free(wrapper->ctx);
-        }
-        if (wrapper->model) {
-            llama_free_model(wrapper->model);
-        }
-        delete wrapper;
-        llama_backend_free();
-    }
-}
-
-extern "C" JNIEXPORT jint JNICALL
-Java_com_saaya_ai_LlamaNative_getContextSize(
-        JNIEnv* env,
-        jobject /* this */,
-        jlong modelPtr) {
-    
-    auto* wrapper = reinterpret_cast<llama_context_wrapper*>(modelPtr);
-    if (wrapper && wrapper->ctx) {
-        return llama_n_ctx(wrapper->ctx);
-    }
-    return 0;
-}
-
-extern "C" JNIEXPORT jboolean JNICALL
-Java_com_saaya_ai_LlamaNative_isModelLoaded(
-        JNIEnv* env,
-        jobject /* this */,
-        jlong modelPtr) {
-    
-    auto* wrapper = reinterpret_cast<llama_context_wrapper*>(modelPtr);
-    return (wrapper && wrapper->model && wrapper->ctx) ? JNI_TRUE : JNI_FALSE;
-}
+} // extern "C"
