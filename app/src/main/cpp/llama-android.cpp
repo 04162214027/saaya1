@@ -11,6 +11,23 @@
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
+// Helper to add token to batch
+static void llama_batch_add(
+    struct llama_batch & batch,
+    llama_token id,
+    llama_pos pos,
+    const std::vector<llama_seq_id> & seq_ids,
+    bool logits) {
+    batch.token[batch.n_tokens] = id;
+    batch.pos[batch.n_tokens] = pos;
+    batch.n_seq_id[batch.n_tokens] = seq_ids.size();
+    for (size_t i = 0; i < seq_ids.size(); ++i) {
+        batch.seq_id[batch.n_tokens][i] = seq_ids[i];
+    }
+    batch.logits[batch.n_tokens] = logits;
+    batch.n_tokens++;
+}
+
 // Global context holder
 struct LlamaContext {
     llama_model* model = nullptr;
@@ -62,7 +79,7 @@ Java_com_saaya_ai_LlamaCpp_loadModel(
             llama_free(g_llama_ctx->ctx);
         }
         if (g_llama_ctx->model) {
-            llama_free_model(g_llama_ctx->model);
+            llama_model_free(g_llama_ctx->model);
         }
     }
     
@@ -76,8 +93,8 @@ Java_com_saaya_ai_LlamaCpp_loadModel(
     model_params.use_mmap = true;  // Memory mapping for large models
     model_params.use_mlock = false;
     
-    // Load model
-    g_llama_ctx->model = llama_load_model_from_file(model_path, model_params);
+    // Load model with new API
+    g_llama_ctx->model = llama_model_load_from_file(model_path, model_params);
     
     env->ReleaseStringUTFChars(modelPath, model_path);
     
@@ -92,14 +109,13 @@ Java_com_saaya_ai_LlamaCpp_loadModel(
     ctx_params.n_ctx = nCtx;
     ctx_params.n_threads = nThreads;
     ctx_params.n_threads_batch = nThreads;
-    ctx_params.rope_scaling_type = LLAMA_ROPE_SCALING_TYPE_UNSPECIFIED;
     
-    // Create context
-    g_llama_ctx->ctx = llama_new_context_with_model(g_llama_ctx->model, ctx_params);
+    // Create context with new API
+    g_llama_ctx->ctx = llama_init_from_model(g_llama_ctx->model, ctx_params);
     
     if (!g_llama_ctx->ctx) {
         LOGE("Failed to create context");
-        llama_free_model(g_llama_ctx->model);
+        llama_model_free(g_llama_ctx->model);
         g_llama_ctx.reset();
         return JNI_FALSE;
     }
@@ -136,12 +152,13 @@ Java_com_saaya_ai_LlamaCpp_generateToken(
     
     LOGI("Generating response for prompt: %s", prompt_str.c_str());
     
-    // Tokenize prompt
+    // Tokenize prompt - get vocab from model
+    const llama_vocab* vocab = llama_model_get_vocab(g_llama_ctx->model);
     std::vector<llama_token> tokens;
     tokens.resize(prompt_str.length() + 2);
     
     int n_tokens = llama_tokenize(
-        g_llama_ctx->model,
+        vocab,
         prompt_str.c_str(),
         prompt_str.length(),
         tokens.data(),
@@ -153,7 +170,7 @@ Java_com_saaya_ai_LlamaCpp_generateToken(
     if (n_tokens < 0) {
         tokens.resize(-n_tokens);
         n_tokens = llama_tokenize(
-            g_llama_ctx->model,
+            vocab,
             prompt_str.c_str(),
             prompt_str.length(),
             tokens.data(),
@@ -167,7 +184,7 @@ Java_com_saaya_ai_LlamaCpp_generateToken(
     
     LOGI("Tokenized prompt: %d tokens", n_tokens);
     
-    // Reset context
+    // Clear KV cache with new API
     llama_kv_cache_clear(g_llama_ctx->ctx);
     llama_sampler_reset(g_llama_ctx->sampler);
     
@@ -175,10 +192,13 @@ Java_com_saaya_ai_LlamaCpp_generateToken(
     llama_batch batch = llama_batch_init(n_tokens, 0, 1);
     
     for (int i = 0; i < n_tokens; i++) {
-        llama_batch_add(batch, tokens[i], i, { 0 }, false);
+        llama_batch_add(batch, tokens[i], i, {0}, false);
     }
     
-    batch.logits[batch.n_tokens - 1] = true;
+    // Mark last token for logits
+    if (batch.n_tokens > 0) {
+        batch.logits[batch.n_tokens - 1] = true;
+    }
     
     if (llama_decode(g_llama_ctx->ctx, batch) != 0) {
         LOGE("Failed to decode prompt");
@@ -194,22 +214,22 @@ Java_com_saaya_ai_LlamaCpp_generateToken(
     while (n_gen < maxTokens) {
         const llama_token new_token_id = llama_sampler_sample(g_llama_ctx->sampler, g_llama_ctx->ctx, -1);
         
-        // Check for EOS
-        if (llama_token_is_eog(g_llama_ctx->model, new_token_id)) {
+        // Check for EOG with new API
+        if (llama_vocab_is_eog(vocab, new_token_id)) {
             break;
         }
         
-        // Get token text
+        // Get token text with new API
         char token_str[256];
-        int n = llama_token_to_piece(g_llama_ctx->model, new_token_id, token_str, sizeof(token_str), 0, false);
+        int n = llama_token_to_piece(vocab, new_token_id, token_str, sizeof(token_str), 0, false);
         
         if (n > 0) {
             response.append(token_str, n);
         }
         
-        // Prepare next batch
-        llama_batch_clear(batch);
-        llama_batch_add(batch, new_token_id, n_cur++, { 0 }, true);
+        // Prepare next batch - manual clear
+        batch.n_tokens = 0;
+        llama_batch_add(batch, new_token_id, n_cur++, {0}, true);
         
         if (llama_decode(g_llama_ctx->ctx, batch) != 0) {
             LOGE("Failed to decode token");
@@ -239,7 +259,7 @@ Java_com_saaya_ai_LlamaCpp_unloadModel(JNIEnv* env, jclass clazz) {
             llama_free(g_llama_ctx->ctx);
         }
         if (g_llama_ctx->model) {
-            llama_free_model(g_llama_ctx->model);
+            llama_model_free(g_llama_ctx->model);
         }
         g_llama_ctx.reset();
     }
@@ -252,13 +272,20 @@ Java_com_saaya_ai_LlamaCpp_getModelInfo(JNIEnv* env, jclass clazz) {
         return env->NewStringUTF("No model loaded");
     }
     
+    // Get vocab for vocab size
+    const llama_vocab* vocab = llama_model_get_vocab(g_llama_ctx->model);
+    int32_t n_vocab = llama_vocab_n_tokens(vocab);
+    
     char buf[512];
+    char desc[256];
+    llama_model_desc(g_llama_ctx->model, desc, sizeof(desc));
+    
     snprintf(buf, sizeof(buf), 
         "Model: %s\nContext: %d\nThreads: %d\nVocab: %d",
-        llama_model_desc(g_llama_ctx->model, buf, sizeof(buf)),
+        desc,
         g_llama_ctx->n_ctx,
         g_llama_ctx->n_threads,
-        llama_n_vocab(g_llama_ctx->model)
+        n_vocab
     );
     
     return env->NewStringUTF(buf);
