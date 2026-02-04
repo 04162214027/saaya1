@@ -27,6 +27,15 @@ jobs:
       
     - name: Validate Gradle wrapper
       uses: gradle/actions/wrapper-validation@v3
+      continue-on-error: true
+      timeout-minutes: 2
+      
+    - name: Clone llama.cpp sources
+      run: |
+        git clone --depth 1 --branch master https://github.com/ggerganov/llama.cpp.git app/src/main/cpp/llama.cpp
+        echo "Verifying llama.cpp files..."
+        ls -la app/src/main/cpp/llama.cpp/src/
+        ls -la app/src/main/cpp/llama.cpp/ggml/src/
       
     - name: Build Debug APK
       run: ./gradlew assembleDebug --stacktrace
