@@ -4,8 +4,8 @@
 #include <vector>
 #include <memory>
 #include <cstring>
-#include "llama.cpp/llama.h"
-#include "llama.cpp/ggml.h"
+#include "llama.h"
+#include "ggml.h"
 
 #define LOG_TAG "LlamaCpp"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
