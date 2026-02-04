@@ -20,16 +20,26 @@ set(LLAMA_CPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp)
 set(LLAMA_SRC_DIR ${LLAMA_CPP_DIR}/src)
 set(GGML_DIR ${LLAMA_CPP_DIR}/ggml)
 
-# Add llama.cpp sources (new structure as of 2024)
-set(LLAMA_SOURCES
+# Add ggml sources
+set(GGML_SOURCES
     ${GGML_DIR}/src/ggml.c
     ${GGML_DIR}/src/ggml-alloc.c
-    ${GGML_DIR}/src/ggml-backend.c
+    ${GGML_DIR}/src/ggml-backend.cpp
+    ${GGML_DIR}/src/ggml-backend-reg.cpp
     ${GGML_DIR}/src/ggml-quants.c
+    ${GGML_DIR}/src/ggml-threading.cpp
+)
+
+# Add core llama.cpp sources
+set(LLAMA_SOURCES
     ${LLAMA_SRC_DIR}/llama.cpp
     ${LLAMA_SRC_DIR}/llama-vocab.cpp
     ${LLAMA_SRC_DIR}/llama-grammar.cpp
     ${LLAMA_SRC_DIR}/llama-sampling.cpp
+    ${LLAMA_SRC_DIR}/llama-model.cpp
+    ${LLAMA_SRC_DIR}/llama-context.cpp
+    ${LLAMA_SRC_DIR}/llama-batch.cpp
+    ${LLAMA_SRC_DIR}/unicode.cpp
 )
 
 # Include directories
@@ -40,7 +50,7 @@ include_directories(
 )
 
 # Build llama.cpp as static library
-add_library(llama STATIC ${LLAMA_SOURCES})
+add_library(llama STATIC ${GGML_SOURCES} ${LLAMA_SOURCES})
 
 target_compile_definitions(llama PRIVATE
     GGML_USE_K_QUANTS
