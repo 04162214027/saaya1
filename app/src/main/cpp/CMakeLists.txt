@@ -46,6 +46,8 @@ set(LLAMA_SOURCES
 include_directories(
     ${LLAMA_CPP_DIR}/include
     ${GGML_DIR}/include
+    ${GGML_DIR}/src
+    ${LLAMA_SRC_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
 
@@ -55,6 +57,8 @@ add_library(llama STATIC ${GGML_SOURCES} ${LLAMA_SOURCES})
 target_compile_definitions(llama PRIVATE
     GGML_USE_K_QUANTS
     GGML_MULTIPLATFORM
+    GGML_VERSION="1.0.0"
+    GGML_COMMIT="unknown"
 )
 
 # JNI wrapper library
