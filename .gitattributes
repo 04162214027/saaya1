@@ -1,0 +1,15 @@
+# Ensure gradlew has Unix line endings on all platforms
+gradlew text eol=lf
+*.sh text eol=lf
+
+# Windows scripts should have Windows line endings
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary files
+*.jar binary
+*.apk binary
+*.so binary
+*.png binary
+*.jpg binary
+*.jpeg binary

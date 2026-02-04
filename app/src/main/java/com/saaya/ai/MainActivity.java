@@ -31,15 +31,13 @@ import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
-import de.kherud.llama.LlamaModel;
-import de.kherud.llama.ModelParameters;
-import de.kherud.llama.InferenceParameters;
+import com.saaya.ai.LlamaModel.ModelParameters;
+import com.saaya.ai.LlamaModel.InferenceParameters;
 
 public class MainActivity extends AppCompatActivity {
     private static final String TAG = "SaayaAI";
