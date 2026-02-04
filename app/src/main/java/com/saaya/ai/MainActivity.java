@@ -409,8 +409,8 @@ public class MainActivity extends AppCompatActivity {
 
                 StringBuilder fullResponse = new StringBuilder();
                 
-                for (LlamaModel.Output output : model.generate(userMessage, inferParams)) {
-                    fullResponse.append(output);
+                for (String token : model.generate(userMessage, inferParams)) {
+                    fullResponse.append(token);
                     
                     final String currentResponse = fullResponse.toString();
                     mainHandler.post(() -> {
