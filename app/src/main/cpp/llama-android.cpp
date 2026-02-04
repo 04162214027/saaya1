@@ -185,7 +185,7 @@ Java_com_saaya_ai_LlamaCpp_generateToken(
     LOGI("Tokenized prompt: %d tokens", n_tokens);
     
     // Clear KV cache with new API
-    // Remove all tokens (seq_id -1) from position 0 to the end (p1 -1)
+    // Remove all tokens from all sequences (seq_id -1) from position 0 to end (p1 -1)
     llama_kv_cache_seq_rm(g_llama_ctx->ctx, -1, 0, -1);
     llama_sampler_reset(g_llama_ctx->sampler);
     
